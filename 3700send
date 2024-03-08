@@ -3,47 +3,134 @@
 import argparse, socket, time, json, select, struct, sys, math
 
 DATA_SIZE = 1375
+WINDOW_PACKETS = 2
 
 class Sender:
+    """
+    Represents a sender transmitting data over a reliable transport protocol over UDP.
+    
+    Attributes
+    ----------
+    socket : socket.socket
+        The UDP socket used for communication.
+    remote_port : int
+        The port on the remote host from which data is received.
+    waiting: bool
+        Determines if the protocol is waiting for an ACK
+    sequence: int
+        Keeps count of the sequence number
+    
+
+    Methods
+    -------
+    __init__()
+        Initializes the Sender object, creates a UDP socket, and binds it to a localhost address.
+    send(message: dict)
+        Sends a message.
+    log(message: str)
+        Logs a message for informational purposes.
+    run()
+        Main loop for receiving and processing messages.
+    """
     def __init__(self, host, port):
+        """
+        Initializes a new Sender instance.
+
+        Method Details
+        --------------
+        - Creates a UDP socket using AF_INET and SOCK_DGRAM.
+        - Binds the socket to a localhost address ('0.0.0.0', 0).
+        - Initalizes the waiting to False
+        """
         self.host = host
         self.remote_port = int(port)
         self.log("Sender starting up using port %s" % self.remote_port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
         self.waiting = False
+        self.seq_num: int = 1
 
     def log(self, message):
+        """
+        Logs a message for informational purposes.
+
+        Parameters
+        ----------
+        message : str
+            The message to be logged.
+        """
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
 
     def send(self, message):
+        """
+        Sends a message.
+
+        Parameters
+        ----------
+        message : dict
+            The dictionary representing the message to be sent.
+
+        Method Details
+        --------------
+        - Converts the message dictionary to a JSON-formatted string.
+        - Encodes the JSON string using UTF-8.
+        - Sends the encoded message via the UDP socket to the specified remote host and port.
+        """
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
 
     def run(self):
+        """
+        Main loop for processing and sending messages.
+
+        Method Details
+        --------------
+        - Waits for incoming messages using select.
+        - Processes standard input.
+        - Sends messages.
+        """
         while True:
             sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
-
             socks = select.select(sockets, [], [], 0.1)[0]
             for conn in socks:
                 if conn == self.socket:
                     k, addr = conn.recvfrom(65535)
-                    msg = k.decode('utf-8')
-
+                    msg = json.loads(k.decode('utf-8'))
+                    print(self.seq_num)
                     self.log("Received message '%s'" % msg)
+                    # In the future this is going to need a timer
+                    while msg["hdr"]["ack"] != self.seq_num:
+                        k, addr = conn.recvfrom(65535)
+                        msg = json.loads(k.decode('utf-8'))
+                        self.log("Received message '%s'" % msg)
                     self.waiting = False
                 elif conn == sys.stdin:
-                    data = sys.stdin.read(DATA_SIZE)
-                    if len(data) == 0:
-                        self.log("All done!")
-                        sys.exit(0)
-
-                    msg = { "type": "msg", "data": data }
-                    self.log("Sending message '%s'" % msg)
-                    self.send(msg)
+                    for i in range(WINDOW_PACKETS):
+                        data = sys.stdin.read(DATA_SIZE)
+                        if len(data) == 0:
+                            self.log("All done!")
+                            sys.exit(0)
+                        msg = self.build(data)
+                        self.log("Sending message '%s'" % msg)
+                        self.send(msg)
                     self.waiting = True
 
         return
+    
+    def build(self, data: str) -> dict:
+        datagram = {
+            "hdr": {
+                "seq": self.seq_num,
+            },
+            "msg": {
+                "type": "msg",
+                "data": data
+            }
+        }
+        self.seq_num += sys.getsizeof(datagram)
+        return datagram
+        
+    
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='send data')
