@@ -50,6 +50,7 @@ class Sender:
         self.waiting = False
         self.seq_num: int = 1
         self.buffer: list = []
+        self.sent_times = {}
 
     def log(self, message):
         """
@@ -99,8 +100,19 @@ class Sender:
                         k, addr = conn.recvfrom(65535)
                         msg = json.loads(k.decode('utf-8'))
                         self.buffer.append(msg)
-                        print(self.seq_num)
                         self.log("Received message '%s'" % msg)
+
+                    # Process received messages and handle acknowledgments
+                    for msg in self.buffer:
+                        seq_number = msg["hdr"]["ack"]
+                        if seq_number in self.sent_times:
+                            sent_time, sent_msg = self.sent_times.pop(seq_number)
+                            rtt = time.time() - sent_time
+                            if rtt > 1:
+                                # Retransmit the message if RTT exceeds threshold
+                                self.send(sent_msg)
+                            else:
+                                self.log("Message with sequence number %d successfully delivered (RTT: %.3f seconds)" % (seq_number, rtt))
                     self.buffer = []
                     self.waiting = False
                 elif conn == sys.stdin:
@@ -110,12 +122,15 @@ class Sender:
                             self.log("All done!")
                             sys.exit(0)
                         msg = self.build(data)
+                        sent_time = time.time()
+                        self.sent_times[self.seq_num] = (sent_time, msg)
                         self.log("Sending message '%s'" % msg)
                         self.send(msg)
                     self.waiting = True
 
         return
-    
+
+
     def build(self, data: str) -> dict:
         datagram = {
             "hdr": {
