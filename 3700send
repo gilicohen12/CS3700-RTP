@@ -50,7 +50,8 @@ class Sender:
         self.waiting = False
         self.seq_num: int = 1
         self.buffer: list = []
-        self.sent_times = {}
+        self.sent_msgs = []
+        
 
     def log(self, message):
         """
@@ -96,24 +97,25 @@ class Sender:
             socks = select.select(sockets, [], [], 0.1)[0]
             for conn in socks:
                 if conn == self.socket:
+                    nums = []
                     while len(self.buffer) < 4:
                         k, addr = conn.recvfrom(65535)
                         msg = json.loads(k.decode('utf-8'))
                         self.buffer.append(msg)
+                        nums.append(msg["hdr"]["ack"])
                         self.log("Received message '%s'" % msg)
 
                     # Process received messages and handle acknowledgments
-                    for msg in self.buffer:
-                        seq_number = msg["hdr"]["ack"]
-                        if seq_number in self.sent_times:
-                            sent_time, sent_msg = self.sent_times.pop(seq_number)
-                            rtt = time.time() - sent_time
-                            if rtt > 1:
-                                # Retransmit the message if RTT exceeds threshold
-                                self.send(sent_msg)
-                            else:
-                                self.log("Message with sequence number %d successfully delivered (RTT: %.3f seconds)" % (seq_number, rtt))
+                    for sent_time, sent_msg in self.sent_msgs:
+                        rtt = time.time() - sent_time
+                        if (sent_msg["hdr"]["seq"] + sys.getsizeof(sent_msg)) not in nums and rtt > 1:
+                            self.send(sent_msg)
+                            self.log("------------ %s" % sent_msg)
+                        else:
+                            seq_number = sent_msg["hdr"]["seq"]
+                            self.log("Message with sequence number %d successfully delivered (RTT: %.3f seconds)" % (seq_number, rtt))
                     self.buffer = []
+                    nums = []
                     self.waiting = False
                 elif conn == sys.stdin:
                     for i in range(WINDOW_PACKETS):
@@ -123,7 +125,7 @@ class Sender:
                             sys.exit(0)
                         msg = self.build(data)
                         sent_time = time.time()
-                        self.sent_times[self.seq_num] = (sent_time, msg)
+                        self.sent_msgs.append((sent_time, msg))
                         self.log("Sending message '%s'" % msg)
                         self.send(msg)
                     self.waiting = True
