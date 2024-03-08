@@ -3,7 +3,7 @@
 import argparse, socket, time, json, select, struct, sys, math
 
 DATA_SIZE = 1375
-WINDOW_PACKETS = 2
+WINDOW_PACKETS = 4
 
 class Sender:
     """
@@ -99,7 +99,7 @@ class Sender:
                     print(self.seq_num)
                     self.log("Received message '%s'" % msg)
                     # In the future this is going to need a timer
-                    while msg["hdr"]["ack"] != self.seq_num:
+                    if msg["hdr"]["ack"] != self.seq_num:
                         k, addr = conn.recvfrom(65535)
                         msg = json.loads(k.decode('utf-8'))
                         self.log("Received message '%s'" % msg)

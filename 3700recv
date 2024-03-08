@@ -52,6 +52,7 @@ class Receiver:
         self.remote_host: str = None
         self.remote_port: int = None
         self.ack_num: int = 1
+        self.buffer: list = []
 
     def send(self, message: dict):
         """
@@ -95,22 +96,25 @@ class Receiver:
         while True:
             socks = select.select([self.socket], [], [])[0]
             for conn in socks:
-                data, addr = conn.recvfrom(65535)
+                while len(self.buffer) < 4:
+                    data, addr = conn.recvfrom(65535)
 
-                # Grab the remote host/port if we don't already have it
-                if self.remote_host is None:
-                    self.remote_host = addr[0]
-                    self.remote_port = addr[1]
+                    # Grab the remote host/port if we don't already have it
+                    if self.remote_host is None:
+                        self.remote_host = addr[0]
+                        self.remote_port = addr[1]
 
-                msg = json.loads(data.decode('utf-8'))
-                self.log("Received data message %s" % msg)
-                if msg["hdr"]["seq"] >= self.ack_num:
+                    msg = json.loads(data.decode('utf-8'))
+                    self.log("Received data message %s" % msg)
+                    self.buffer.append(msg)
+                sorted(self.buffer, key=lambda x: x["hdr"]["seq"])
+                for msg in self.buffer: 
+                    if msg["hdr"]["seq"] >= self.ack_num:
+                        print(msg["msg"]["data"], end='', flush=True)
 
-                    # Print out the data to stdout
-                    print(msg["msg"]["data"], end='', flush=True)
-
-                    ack = self.ack(sys.getsizeof(msg))
-                    self.send(ack)
+                        ack = self.ack(sys.getsizeof(msg))
+                        self.send(ack)
+    
 
     def ack(self, msg_size: int) -> dict:
         datagram = {
