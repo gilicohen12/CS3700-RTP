@@ -107,14 +107,14 @@ class Receiver:
                     msg = json.loads(data.decode('utf-8'))
                     self.log("Received data message %s" % msg)
                     self.buffer.append(msg)
-                sorted(self.buffer, key=lambda x: x["hdr"]["seq"])
+                self.buffer = sorted(self.buffer, key=lambda x: x["hdr"]["seq"])
                 for msg in self.buffer: 
                     if msg["hdr"]["seq"] >= self.ack_num:
                         print(msg["msg"]["data"], end='', flush=True)
 
                         ack = self.ack(sys.getsizeof(msg))
                         self.send(ack)
-    
+                self.buffer = []
 
     def ack(self, msg_size: int) -> dict:
         datagram = {

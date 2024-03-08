@@ -49,6 +49,7 @@ class Sender:
         self.socket.bind(('0.0.0.0', 0))
         self.waiting = False
         self.seq_num: int = 1
+        self.buffer: list = []
 
     def log(self, message):
         """
@@ -94,15 +95,13 @@ class Sender:
             socks = select.select(sockets, [], [], 0.1)[0]
             for conn in socks:
                 if conn == self.socket:
-                    k, addr = conn.recvfrom(65535)
-                    msg = json.loads(k.decode('utf-8'))
-                    print(self.seq_num)
-                    self.log("Received message '%s'" % msg)
-                    # In the future this is going to need a timer
-                    if msg["hdr"]["ack"] != self.seq_num:
+                    while len(self.buffer) < 4:
                         k, addr = conn.recvfrom(65535)
                         msg = json.loads(k.decode('utf-8'))
+                        self.buffer.append(msg)
+                        print(self.seq_num)
                         self.log("Received message '%s'" % msg)
+                    self.buffer = []
                     self.waiting = False
                 elif conn == sys.stdin:
                     for i in range(WINDOW_PACKETS):
