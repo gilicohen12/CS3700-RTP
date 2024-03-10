@@ -3,150 +3,109 @@
 import argparse, socket, time, json, select, struct, sys, math
 
 DATA_SIZE = 1375
-WINDOW_PACKETS = 4
+RTT = 1
+WINDOW_SIZE = 4
 
 class Sender:
-    """
-    Represents a sender transmitting data over a reliable transport protocol over UDP.
-    
-    Attributes
-    ----------
-    socket : socket.socket
-        The UDP socket used for communication.
-    remote_port : int
-        The port on the remote host from which data is received.
-    waiting: bool
-        Determines if the protocol is waiting for an ACK
-    sequence: int
-        Keeps count of the sequence number
-    
-
-    Methods
-    -------
-    __init__()
-        Initializes the Sender object, creates a UDP socket, and binds it to a localhost address.
-    send(message: dict)
-        Sends a message.
-    log(message: str)
-        Logs a message for informational purposes.
-    run()
-        Main loop for receiving and processing messages.
-    """
     def __init__(self, host, port):
-        """
-        Initializes a new Sender instance.
-
-        Method Details
-        --------------
-        - Creates a UDP socket using AF_INET and SOCK_DGRAM.
-        - Binds the socket to a localhost address ('0.0.0.0', 0).
-        - Initalizes the waiting to False
-        """
         self.host = host
         self.remote_port = int(port)
         self.log("Sender starting up using port %s" % self.remote_port)
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
         self.waiting = False
-        self.seq_num: int = 1
-        self.buffer: list = []
-        self.sent_msgs = []
+        
+        self.buffer = []
+        self.history = []
+        self.seq_num = 1
         
 
     def log(self, message):
-        """
-        Logs a message for informational purposes.
-
-        Parameters
-        ----------
-        message : str
-            The message to be logged.
-        """
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
 
     def send(self, message):
-        """
-        Sends a message.
-
-        Parameters
-        ----------
-        message : dict
-            The dictionary representing the message to be sent.
-
-        Method Details
-        --------------
-        - Converts the message dictionary to a JSON-formatted string.
-        - Encodes the JSON string using UTF-8.
-        - Sends the encoded message via the UDP socket to the specified remote host and port.
-        """
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
+        
+    def read(self, stdin):
+        data = sys.stdin.read(DATA_SIZE)
+        if len(data) == 0:
+            self.log("All done!")
+            sys.exit(0)
+        return data
+    
+    def receive(self, socket):
+        socket.settimeout(0.2)
+        
+        try:
+            while True:
+                if len(self.buffer) > WINDOW_SIZE:
+                    break
+                k, addr = socket.recvfrom(65535)
+                self.log("%s" % k)
+                msg = k.decode('utf-8')
+                self.log("Received message '%s'" % msg)
+                if msg not in self.buffer:
+                    self.buffer.append(msg)
+                
+        except:
+            self.log("Done collecting data.")
+        
 
     def run(self):
-        """
-        Main loop for processing and sending messages.
-
-        Method Details
-        --------------
-        - Waits for incoming messages using select.
-        - Processes standard input.
-        - Sends messages.
-        """
         while True:
             sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
+
             socks = select.select(sockets, [], [], 0.1)[0]
             for conn in socks:
                 if conn == self.socket:
-                    nums = []
-                    while len(self.buffer) < 4:
-                        k, addr = conn.recvfrom(65535)
-                        msg = json.loads(k.decode('utf-8'))
-                        self.buffer.append(msg)
-                        nums.append(msg["hdr"]["ack"])
-                        self.log("Received message '%s'" % msg)
-
-                    # Process received messages and handle acknowledgments
-                    for sent_time, sent_msg in self.sent_msgs:
-                        rtt = time.time() - sent_time
-                        if (sent_msg["hdr"]["seq"] + sys.getsizeof(sent_msg)) not in nums and rtt > 1:
-                            self.send(sent_msg)
-                            self.log("------------ %s" % sent_msg)
-                        else:
-                            seq_number = sent_msg["hdr"]["seq"]
-                            self.log("Message with sequence number %d successfully delivered (RTT: %.3f seconds)" % (seq_number, rtt))
+                    self.receive(conn)
                     self.buffer = []
-                    nums = []
+                    #map(self.resend, self.history)
+
                     self.waiting = False
                 elif conn == sys.stdin:
-                    for i in range(WINDOW_PACKETS):
-                        data = sys.stdin.read(DATA_SIZE)
-                        if len(data) == 0:
-                            self.log("All done!")
-                            sys.exit(0)
-                        msg = self.build(data)
-                        sent_time = time.time()
-                        self.sent_msgs.append((sent_time, msg))
+                    for i in range(WINDOW_SIZE):
+                        data = self.read(conn)
+
+                        msg = self.assemble(data)
+                        self.increment(msg)
+                        #self.archive(msg)
+                        
                         self.log("Sending message '%s'" % msg)
                         self.send(msg)
-                    self.waiting = True
+                        self.waiting = True
 
         return
-
-
-    def build(self, data: str) -> dict:
-        datagram = {
-            "hdr": {
-                "seq": self.seq_num,
-            },
-            "msg": {
-                "type": "msg",
-                "data": data
-            }
-        }
-        self.seq_num += sys.getsizeof(datagram)
-        return datagram
-        
     
+    def assemble(self, data):
+        msg = { "hdr": {
+                        "seq": self.seq_num,
+                        },
+               "msg": {
+                        "type": "msg",
+                        "data": data,
+                        }
+               }
+        return msg
+    
+    def increment(self, msg):
+        self.seq_num += sys.getsizeof(msg)
+        if self.seq_num > 65535:
+            self.seq_num -= 65535
+    
+    def archive(self, msg):
+        entry = (msg, time.time())
+        self.history.append(entry)
+    
+    def resend(self, entry):
+        current_time = time.time()
+        time_sent = entry[1]
+        msg = entry[0]
+        
+        if current_time - time_sent > RTT and msg["hdr"]["ack"] not in self.buffer:
+            self.log("------Resending------")
+            self.send(msg)
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='send data')

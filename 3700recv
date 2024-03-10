@@ -1,121 +1,85 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse
-import socket
-import json
-import select
-import sys
+import argparse, socket, time, json, select, struct, sys, math
+
+WINDOW_SIZE = 4
 
 class Receiver:
-    """
-    The Receiver class represents a receiver implementing a reliable transport protocol over UDP.
-
-    Attributes
-    ----------
-    socket : socket.socket
-        The UDP socket used for communication.
-    port : int
-        The local port to which the socket is bound.
-    remote_host : str
-        The IP address of the remote host from which data is received.
-    remote_port : int
-        The port on the remote host from which data is received.
-
-    Methods
-    -------
-    __init__()
-        Initializes the Receiver object, creates a UDP socket, and binds it to a localhost address.
-    send(message: dict)
-        Sends a message.
-    log(message)
-        Logs a message for informational purposes.
-    run()
-        Main loop for receiving and processing messages.
-    """
-
     def __init__(self):
-        """
-        Initializes a new Receiver instance.
-
-        Method Details
-        --------------
-        - Creates a UDP socket using AF_INET and SOCK_DGRAM.
-        - Binds the socket to a localhost address ('0.0.0.0', 0).
-        - Retrieves the local port to which the socket is bound.
-        - Initializes remote_host and remote_port to None.
-        """
-        self.socket: socket.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
-        self.port: int = self.socket.getsockname()[1]
+        self.port = self.socket.getsockname()[1]
         self.log("Bound to port %d" % self.port)
 
-        self.remote_host: str = None
-        self.remote_port: int = None
-        self.ack_num: int = 1
-        self.buffer: list = []
+        self.remote_host = None
+        self.remote_port = None
+        
+        self.ack_num = 1
+        self.buffer = []
+        self.check_list = []
 
-    def send(self, message: dict):
-        """
-        Sends a message.
-
-        Parameters
-        ----------
-        message : dict
-            The dictionary representing the message to be sent.
-
-        Method Details
-        --------------
-        - Converts the message dictionary to a JSON-formatted string.
-        - Encodes the JSON string using UTF-8.
-        - Sends the encoded message via the UDP socket to the specified remote host and port.
-        """
+    def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
 
     def log(self, message):
-        """
-        Logs a message for informational purposes.
-
-        Parameters
-        ----------
-        message : str
-            The message to be logged.
-        """
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
+        
+    def check_buffer(self, msg):
+        if int(msg["hdr"]["seq"]) not in self.check_list:
+            self.check_list.append(int(msg["hdr"]["seq"]))
+            self.buffer.append(msg)
+            self.log("Received data message %s" % msg)
+        else:
+            self.log("Duplicate Detected: %s" % msg)
+            
 
     def run(self):
-        """
-        Main loop for receiving and processing messages.
-
-        Method Details
-        --------------
-        - Waits for incoming messages using select.
-        - Processes received data messages.
-        - Sends acknowledgment messages.
-        """
         while True:
             socks = select.select([self.socket], [], [])[0]
             for conn in socks:
-                while len(self.buffer) < 4:
-                    data, addr = conn.recvfrom(65535)
+                conn.settimeout(1)
+                try:
+                    while len(self.buffer) < WINDOW_SIZE:
+                        self.log("Attempting to collect data...")
+                        self.log("Current buffer list: %s" % self.buffer)
+                        
+                        data, addr = conn.recvfrom(65535)
+                        msg = json.loads(data.decode('utf-8'))
+                        self.check_buffer(msg)
+                        
+                        self.log("Updated buffer list: %s" % self.buffer)
 
-                    # Grab the remote host/port if we don't already have it
-                    if self.remote_host is None:
-                        self.remote_host = addr[0]
-                        self.remote_port = addr[1]
-
-                    msg = json.loads(data.decode('utf-8'))
-                    self.log("Received data message %s" % msg)
-                    self.buffer.append(msg)
+                        if self.remote_host is None:
+                            self.remote_host = addr[0]
+                            self.remote_port = addr[1]    
+                except:
+                    self.log("Done collecting data.")
+                    
+                self.log("Sorting the receiver buffer...")        
+                self.log("Unsorted buffer list: %s" % self.buffer)  
+                            
                 self.buffer = sorted(self.buffer, key=lambda x: x["hdr"]["seq"])
+                
+                self.log("Sorted buffer list: %s" % self.buffer) 
+                
                 for msg in self.buffer: 
-                    if msg["hdr"]["seq"] >= self.ack_num:
+                    self.log("Comparing sequence number: %i & %i" % (int(msg["hdr"]["seq"]), self.ack_num))
+                    if int(msg["hdr"]["seq"]) >= self.ack_num:
                         print(msg["msg"]["data"], end='', flush=True)
-
+                        
                         ack = self.ack(sys.getsizeof(msg))
+                        self.log("Sending acknowlegdment '%s'" % ack)
                         self.send(ack)
+                    else:
+                        self.log("Duplicate Detected: %s" % msg)
+                        
                 self.buffer = []
+                self.check_list = []
 
+
+        return
+    
     def ack(self, msg_size: int) -> dict:
         datagram = {
             "hdr": {
@@ -128,9 +92,8 @@ class Receiver:
         self.ack_num += msg_size
         return datagram
 
-
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='receive data')
     args = parser.parse_args()
-    receiver = Receiver()
-    receiver.run()
+    sender = Receiver()
+    sender.run()
