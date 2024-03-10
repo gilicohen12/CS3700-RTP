@@ -54,14 +54,14 @@ class Receiver:
                             self.remote_host = addr[0]
                             self.remote_port = addr[1]    
                 except:
-                    self.log("Done collecting data.")
+                    self.log("Booted from Loop.")
                     
                 self.log("Sorting the receiver buffer...")        
-                self.log("Unsorted buffer list: %s" % self.buffer)  
+                #self.log("Unsorted buffer list: %s" % self.buffer)  
                             
                 self.buffer = sorted(self.buffer, key=lambda x: x["hdr"]["seq"])
                 
-                self.log("Sorted buffer list: %s" % self.buffer) 
+                #self.log("Sorted buffer list: %s" % self.buffer) 
                 
                 for msg in self.buffer: 
                     self.log("Comparing sequence number: %i & %i" % (int(msg["hdr"]["seq"]), self.ack_num))
