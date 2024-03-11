@@ -1,6 +1,8 @@
 #!/usr/bin/env -S python3 -u
 
 import argparse, socket, time, json, select, struct, sys, math
+import hashlib
+from socket import timeout as SocketTimeout
 
 DATA_SIZE = 1375
 RTT = 1
@@ -32,29 +34,44 @@ class Sender:
             self.log("All done!")
             sys.exit(0)
         return data
-    
+
     def receive(self, socket):
-        socket.settimeout(0.2)
-        
-        try:
-            while len(self.history) != 0:
+        socket.settimeout(0.1)
+        while True:
+            try:
                 k, addr = socket.recvfrom(65535)
                 self.log("%s" % k)
-                msg = json.loads(k.decode('utf-8'))
-                self.log("Received message '%s'" % msg)
-                self.log("Current History: %s" % self.history)
-                for entry in self.history:
-                    recv_num = msg["hdr"]["ack"]
-                    sent_num = entry[2]
-                    self.log("Comparing sequence number: %i & %i" % (int(recv_num), sent_num))
-                    if recv_num == sent_num:
-                        self.log("Removed message '%s' from History." % entry[0])
-                        self.history.remove(entry)
+                try:
+                    hck_msg = json.loads(k.decode('utf-8'))
+                    for entry in self.history:
+                        recv_num = hck_msg["hdr"]["ack"]
+                        sent_num = entry[2]
+                        self.log("Comparing sequence number: %i & %i" % (int(recv_num), sent_num))
+                        if recv_num == sent_num:
+                            self.log("Removed message '%s' from History." % entry[0])
+                            self.history.remove(entry)
+                        else:
+                            self.resend(entry)
+                            self.history.remove(entry)
+                except json.JSONDecodeError:
+                    self.log("Invalid JSON format received.")
+                    continue  # Skip processing this message
+
                 self.log("Updated History: %s" % self.history)
-                
-        except:
-            self.log("Done collecting data.")
-        
+
+            except SocketTimeout:
+                self.log("TIMED OUT")
+                break
+                # if self.history:
+                #     resent_entry = self.history[-1]
+                #     history_msg = resent_entry[0]
+                #     self.send(history_msg)
+                #     self.log("Resent message: %s" % history_msg)
+                #     # self.history.remove(resent_entry)
+                # else:
+                #     # self.log("Done collecting data.")
+                #     break  # Exit the while loop after handling the timeout
+
 
     def run(self):
         while True:
@@ -64,7 +81,6 @@ class Sender:
             for conn in socks:
                 if conn == self.socket:
                     self.receive(conn)
-                    #map(self.resend, self.history)
 
                     self.waiting = False
                 elif conn == sys.stdin:
@@ -74,21 +90,24 @@ class Sender:
                         if data:
                             msg = self.assemble(data)
                             self.increment(msg)
-                            self.archive(msg)
                             
                             self.log("Sending message '%s'" % msg)
                             self.send(msg)
                         self.waiting = True
 
         return
+
+
     
     def assemble(self, data):
+        msg_hash = hashlib.sha1(data.encode()).hexdigest()
         msg = { "hdr": {
                         "seq": self.seq_num,
                         },
                "msg": {
                         "type": "msg",
                         "data": data,
+                        "hash": msg_hash,
                         }
                }
         return msg
@@ -97,6 +116,7 @@ class Sender:
         self.seq_num += sys.getsizeof(msg)
         if self.seq_num > 65535:
             self.seq_num -= 65535
+        self.archive(msg)
     
     def archive(self, msg):
         self.log("Adding message to history %s" % msg)
@@ -108,9 +128,10 @@ class Sender:
         time_sent = entry[1]
         msg = entry[0]
         
-        if current_time - time_sent > RTT:
+        if current_time - time_sent > RTT and self.history:
             self.log("------Resending------")
             self.send(msg)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='send data')
