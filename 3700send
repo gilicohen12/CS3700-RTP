@@ -10,7 +10,7 @@ WINDOW_SIZE = 4
 class Sender:
     MESSAGE = bytes([0])
     ACK = bytes([1])
-    rtt = 1.0
+    RTT = 1.0
     adjust_RTT = 2
     ORIG_RTT_RATIO = 0.7
 
@@ -64,7 +64,7 @@ class Sender:
             m += 1
         return m
 
-    def verify_checksum(self, b: bytes) -> bool:
+    def is_msg_not_corrupted(self, b: bytes) -> bool:
         received_digest = b[-self.CHECKSUM_SIZE:]
         calculated_digest = hashlib.sha1(b[:-self.CHECKSUM_SIZE]).digest()
         return received_digest == calculated_digest
@@ -76,7 +76,7 @@ class Sender:
             # Retransmission Timeout Handling
             for i in range(len(self.packets_out) - 1, -1, -1): # Iterate in reverse
                 p = self.packets_out[i]
-                if time.time() - self.time_last_sent[p] > self.rtt * self.adjust_RTT:
+                if time.time() - self.time_last_sent[p] > self.RTT * self.adjust_RTT:
                     self.packets_out.remove(p)
                     self.window = max(self.window * self.WINDOW_REDUCE_RATIO, self.WINDOW_MIN) # Window Size Adjustment
 
@@ -87,14 +87,14 @@ class Sender:
                 if conn == self.socket:
                     k, _ = conn.recvfrom(65535)
 
-                    if self.verify_checksum(k) and k[0:1] == self.ACK:
+                    if self.is_msg_not_corrupted(k) and k[0:1] == self.ACK:
                         self.log(f"Received message '{k}'")
                         acked = self.seq_from(k)
                         if acked in self.packets_out:
                             self.packets_out.remove(acked)
                             self.acked_packets.append(acked)
-                            self.rtt = (self.ORIG_RTT_RATIO * self.rtt) + ((1-self.ORIG_RTT_RATIO) * (time.time() - self.time_last_sent[acked]))
-                            print(self.rtt)
+                            self.RTT = (self.ORIG_RTT_RATIO * self.RTT) + ((1 - self.ORIG_RTT_RATIO) * (time.time() - self.time_last_sent[acked]))
+                            print(self.RTT)
                             self.window += self.WINDOW_INCREASE
 
                         self.waiting = len(self.packets_out) >= self.window
