@@ -1,147 +1,119 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse, socket, time, json, select, struct, sys, math
-import hashlib
-from socket import timeout as SocketTimeout
+import argparse, socket, time, sys, hashlib
+import select
 
-DATA_SIZE = 1375
+DATA_SIZE = 1024
 RTT = 1
 WINDOW_SIZE = 4
 
 class Sender:
+    MESSAGE = bytes([0])
+    ACK = bytes([1])
+    rtt = 1.0
+    adjust_RTT = 2
+    ORIG_RTT_RATIO = 0.7
+
+    CHECKSUM_SIZE = 20
+
+    packets_out = []
+    window = 14
+    WINDOW_INCREASE = 1
+    WINDOW_REDUCE_RATIO = 0.55
+    WINDOW_MIN = 2
+    time_last_sent = {}
+
     def __init__(self, host, port):
         self.host = host
         self.remote_port = int(port)
-        self.log("Sender starting up using port %s" % self.remote_port)
+        self.log(f"Sender starting up using port {self.remote_port}")
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
         self.waiting = False
-        self.received_acks = []
-        
-        self.history = []
-        self.seq_num = 1
-        self.done = False
-        
+        self.packets = []
+        data = sys.stdin.buffer.read(DATA_SIZE)
+        self.sequence_number = 0
+        while data:
+            self.packets.append(self.prepare_packet(self.MESSAGE, self.seq_num(self.sequence_number), data))
+            data = sys.stdin.buffer.read(DATA_SIZE)
+            self.sequence_number += 1
+        self.log(f"Fully chunked {self.sequence_number} packets!")
+        self.acked_packets = []
 
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
 
-    def send(self, message):
-        self.socket.sendto(json.dumps(message).encode('utf-8'), (self.host, self.remote_port))
-        
-    def read(self, stdin):
-        data = sys.stdin.read(DATA_SIZE)
-        if len(data) == 0 and len(self.history) == 0:
-            self.log("All done!")
-            sys.exit(0)
-        return data
+    def send(self, message: bytes):
+        self.socket.sendto(message, (self.host, self.remote_port))
 
-    def receive(self, socket):
-        socket.settimeout(1)
-        while True:
-            try:
-                k, addr = socket.recvfrom(65535)
-                self.log("%s" % k)
-                try:
-                    hck_msg = json.loads(k.decode('utf-8'))
-                    recv_num = hck_msg["hdr"]["ack"]
-                    self.received_acks.append(recv_num)
+    def prepare_packet(self, type: bytes, seq_num: bytes, message: bytes) -> bytes:
+        header = type + seq_num
+        checksum = hashlib.sha1(header + message).digest()
+        return header + message + checksum
 
-                    for entry in self.history:
+    def seq_num(self, num: int) -> bytes:
+        return bytes([(num // 256) % 256, num % 256])
 
-                            sent_num = entry[2]
-                            self.log("Comparing sequence number: %i & %i" % (int(recv_num), sent_num))
-                            if sent_num in self.received_acks:
-                                self.log("Removed message '%s' from History." % entry[0])
-                                self.history.remove(entry)
-                                self.done = True
-                            else:
-                                self.log("RESENT ELSE")
-                                self.resend(entry)
-                                self.history.remove(entry)
-                                self.done = True
-                                # self.done = True
+    def seq_from(self, msg: bytes) -> int:
+        return int.from_bytes(msg[1:3], byteorder='big')
 
-                            if len(self.history) > 0 and self.done:
-                                 self.log("NEED TO RESEND %s" % self.history)
-                                 self.done = False
+    def min_not_sent(self):
+        m = 0
+        while m in self.acked_packets or m in self.packets_out:
+            m += 1
+        return m
 
-                except json.JSONDecodeError:
-                    self.log("Invalid JSON format received.")
-                    continue
-
-                self.log("Updated History: %s" % self.history)
-
-
-            except SocketTimeout:
-                self.log("TIMED OUT")
-                self.log("Saved Acks: %s" % self.received_acks)
-                self.done = True
-                break  # Exit the while loop after handling the timeout
-
+    def verify_checksum(self, b: bytes) -> bool:
+        received_digest = b[-self.CHECKSUM_SIZE:]
+        calculated_digest = hashlib.sha1(b[:-self.CHECKSUM_SIZE]).digest()
+        return received_digest == calculated_digest
 
     def run(self):
         while True:
             sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
+
+            # Retransmission Timeout Handling
+            for i in range(len(self.packets_out) - 1, -1, -1): # Iterate in reverse
+                p = self.packets_out[i]
+                if time.time() - self.time_last_sent[p] > self.rtt * self.adjust_RTT:
+                    self.packets_out.remove(p)
+                    self.window = max(self.window * self.WINDOW_REDUCE_RATIO, self.WINDOW_MIN) # Window Size Adjustment
+
+            self.waiting = len(self.packets_out) >= self.window
+
             socks = select.select(sockets, [], [], 0.1)[0]
             for conn in socks:
                 if conn == self.socket:
-                    self.receive(conn)
+                    k, _ = conn.recvfrom(65535)
 
-                    self.waiting = False
+                    if self.verify_checksum(k) and k[0:1] == self.ACK:
+                        self.log(f"Received message '{k}'")
+                        acked = self.seq_from(k)
+                        if acked in self.packets_out:
+                            self.packets_out.remove(acked)
+                            self.acked_packets.append(acked)
+                            self.rtt = (self.ORIG_RTT_RATIO * self.rtt) + ((1-self.ORIG_RTT_RATIO) * (time.time() - self.time_last_sent[acked]))
+                            print(self.rtt)
+                            self.window += self.WINDOW_INCREASE
+
+                        self.waiting = len(self.packets_out) >= self.window
+                    else:
+                        self.log(f"Received bad message '{k}'")
                 elif conn == sys.stdin:
-                    for i in range(WINDOW_SIZE):
-                        data = self.read(conn)
+                    if len(self.acked_packets) == self.sequence_number:
+                        self.log("All done!")
+                        sys.exit(0)
 
-                        if data:
-                            msg = self.assemble(data)
-                            self.increment(msg)
-                            
-                            self.log("Sending message '%s'" % msg)
-                            self.send(msg)
-                        self.waiting = True
-
+                    sending = self.min_not_sent()
+                    if sending < len(self.packets):
+                        msg = self.packets[sending]
+                        self.packets_out.append(sending)
+                        self.log(f"Sending message '{sending}', packets_out: {self.packets_out}")
+                        self.send(msg)
+                        self.time_last_sent[sending] = time.time()
+                        self.waiting = len(self.packets_out) >= self.window
         return
-
-
-    
-    def assemble(self, data):
-        msg_hash = hashlib.sha1(data.encode()).hexdigest()
-        msg = { "hdr": {
-                        "seq": self.seq_num,
-                        },
-               "msg": {
-                        "type": "msg",
-                        "data": data,
-                        "hash": msg_hash,
-                        }
-               }
-        return msg
-    
-    def increment(self, msg):
-        self.seq_num += sys.getsizeof(msg)
-        if self.seq_num > 65535:
-            self.seq_num -= 65535
-        self.archive(msg)
-    
-    def archive(self, msg):
-        self.log("Adding message to history %s" % msg)
-        entry = (msg, time.time(), self.seq_num)
-        self.history.append(entry)
-    
-    def resend(self, entry):
-        current_time = time.time()
-        time_sent = entry[1]
-        msg = entry[0]
-
-        if current_time - time_sent > RTT and self.history:
-            self.log("-----RESENDING %s" % msg)
-            self.send(msg)
-        self.done = False
-
-
-
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='send data')
