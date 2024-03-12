@@ -16,9 +16,11 @@ class Sender:
         self.socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.socket.bind(('0.0.0.0', 0))
         self.waiting = False
+        self.received_acks = []
         
         self.history = []
         self.seq_num = 1
+        self.done = False
         
 
     def log(self, message):
@@ -36,47 +38,52 @@ class Sender:
         return data
 
     def receive(self, socket):
-        socket.settimeout(0.1)
+        socket.settimeout(1)
         while True:
             try:
                 k, addr = socket.recvfrom(65535)
                 self.log("%s" % k)
                 try:
                     hck_msg = json.loads(k.decode('utf-8'))
+                    recv_num = hck_msg["hdr"]["ack"]
+                    self.received_acks.append(recv_num)
+
                     for entry in self.history:
-                        recv_num = hck_msg["hdr"]["ack"]
-                        sent_num = entry[2]
-                        self.log("Comparing sequence number: %i & %i" % (int(recv_num), sent_num))
-                        if recv_num == sent_num:
-                            self.log("Removed message '%s' from History." % entry[0])
-                            self.history.remove(entry)
-                        else:
-                            self.resend(entry)
-                            self.history.remove(entry)
+
+                            sent_num = entry[2]
+                            self.log("Comparing sequence number: %i & %i" % (int(recv_num), sent_num))
+                            if sent_num in self.received_acks:
+                                self.log("Removed message '%s' from History." % entry[0])
+                                self.history.remove(entry)
+                                self.done = True
+                            else:
+                                self.log("RESENT ELSE")
+                                self.resend(entry)
+                                self.history.remove(entry)
+                                self.done = True
+                                # self.done = True
+
+                            if len(self.history) > 0 and self.done:
+                                 self.log("NEED TO RESEND %s" % self.history)
+                                 self.done = False
+
                 except json.JSONDecodeError:
                     self.log("Invalid JSON format received.")
-                    continue  # Skip processing this message
+                    continue
 
                 self.log("Updated History: %s" % self.history)
 
+
             except SocketTimeout:
                 self.log("TIMED OUT")
-                break
-                # if self.history:
-                #     resent_entry = self.history[-1]
-                #     history_msg = resent_entry[0]
-                #     self.send(history_msg)
-                #     self.log("Resent message: %s" % history_msg)
-                #     # self.history.remove(resent_entry)
-                # else:
-                #     # self.log("Done collecting data.")
-                #     break  # Exit the while loop after handling the timeout
+                self.log("Saved Acks: %s" % self.received_acks)
+                self.done = True
+                break  # Exit the while loop after handling the timeout
 
 
     def run(self):
         while True:
             sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
-
             socks = select.select(sockets, [], [], 0.1)[0]
             for conn in socks:
                 if conn == self.socket:
@@ -127,10 +134,13 @@ class Sender:
         current_time = time.time()
         time_sent = entry[1]
         msg = entry[0]
-        
+
         if current_time - time_sent > RTT and self.history:
-            self.log("------Resending------")
+            self.log("-----RESENDING %s" % msg)
             self.send(msg)
+        self.done = False
+
+
 
 
 if __name__ == "__main__":

@@ -1,8 +1,10 @@
 #!/usr/bin/env -S python3 -u
 
-import argparse, socket, time, json, select, struct, sys, math
+import argparse, socket, time, json, select, struct, sys, math, copy
+import hashlib
 
 WINDOW_SIZE = 4
+PACKET_SIZE = 1500
 
 class Receiver:
     def __init__(self):
@@ -13,10 +15,12 @@ class Receiver:
 
         self.remote_host = None
         self.remote_port = None
-        
+
         self.ack_num = 1
         self.buffer = []
         self.check_list = []
+        self.history = []
+        self.printable = True
 
     def send(self, message):
         self.socket.sendto(json.dumps(message).encode('utf-8'), (self.remote_host, self.remote_port))
@@ -24,73 +28,122 @@ class Receiver:
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
-        
+
+    def is_int_in_list(self, target_int):
+        for msg in self.buffer:
+            if int(msg["hdr"]["seq"]) == target_int:
+                return True
+        return False
+
+
+    def is_packet_corrupted(self, msg):
+        received_hash = msg["msg"]["hash"]
+        data = msg["msg"]["data"]
+        msg_hash = hashlib.sha1(data.encode()).hexdigest()
+        return received_hash != msg_hash
+
     def check_buffer(self, msg):
-        if int(msg["hdr"]["seq"]) not in self.check_list:
-            self.check_list.append(int(msg["hdr"]["seq"]))
-            self.buffer.append(msg)
-            self.log("Received data message %s" % msg)
-        else:
-            self.log("Duplicate Detected: %s" % msg)
-            
+        recv_num = int(msg["hdr"]["seq"])
+        low = self.ack_num
+        high = self.ack_num + WINDOW_SIZE*1500
+
+
+        if recv_num >= low and recv_num <= high:
+
+            if self.is_int_in_list(recv_num) :
+                self.log("Duplicate Detected: %s" % msg["hdr"]["seq"])
+
+                ack = self.ack(recv_num + sys.getsizeof(msg))
+
+                self.log("Sending acknowlegdment '%s'" % ack)
+                self.send(ack)
+            elif self.is_packet_corrupted(msg):
+                # self.send(msg)
+                self.log("package corrupted")
+            else:
+                self.buffer.append(msg)
+                self.log("Received data message %s" % msg["hdr"]["seq"])
+
 
     def run(self):
         while True:
             socks = select.select([self.socket], [], [])[0]
             for conn in socks:
-                conn.settimeout(1)
+                conn.settimeout(0.1)
                 try:
-                    while len(self.buffer) < WINDOW_SIZE:
+                    while True:
                         self.log("Attempting to collect data...")
-                        self.log("Current buffer list: %s" % self.buffer)
-                        
+                        #self.log("Current buffer list: %s" % self.buffer)
+
                         data, addr = conn.recvfrom(65535)
+
                         msg = json.loads(data.decode('utf-8'))
                         self.check_buffer(msg)
-                        
-                        self.log("Updated buffer list: %s" % self.buffer)
+
+                        #self.log("Updated buffer list: %s" % self.buffer)
 
                         if self.remote_host is None:
                             self.remote_host = addr[0]
-                            self.remote_port = addr[1]    
+                            self.remote_port = addr[1]
                 except:
                     self.log("Booted from Loop.")
-                    
-                self.log("Sorting the receiver buffer...")        
-                #self.log("Unsorted buffer list: %s" % self.buffer)  
-                            
+
+                self.log("Updated buffer list: %s" % self.buffer)
                 self.buffer = sorted(self.buffer, key=lambda x: x["hdr"]["seq"])
-                
-                #self.log("Sorted buffer list: %s" % self.buffer) 
-                
-                for msg in self.buffer: 
-                    self.log("Comparing sequence number: %i & %i" % (int(msg["hdr"]["seq"]), self.ack_num))
-                    if int(msg["hdr"]["seq"]) >= self.ack_num:
-                        print(msg["msg"]["data"], end='', flush=True)
-                        
-                        ack = self.ack(sys.getsizeof(msg))
-                        self.log("Sending acknowlegdment '%s'" % ack)
-                        self.send(ack)
-                    else:
-                        self.log("Duplicate Detected: %s" % msg)
-                        
-                self.buffer = []
-                self.check_list = []
+                self.log("Updated buffer list SORTED: %s" % self.buffer)
+                self.discontinuity()
+
+                #for msg in self.buffer:
+                #    self.log("Comparing sequence number: %i & %i" % (int(msg["hdr"]["seq"]), self.ack_num))
+                #    if int(msg["hdr"]["seq"]) >= self.ack_num:
+                #        print(msg["msg"]["data"], end='', flush=True)
+                #
+                #        ack = self.ack(sys.getsizeof(msg))
+                #        self.log("Sending acknowlegdment '%s'" % ack)
+                #        self.send(ack)
+                #    else:
+                #        self.log("Duplicate Detected: %s" % msg)
 
 
         return
-    
-    def ack(self, msg_size: int) -> dict:
+
+    def discontinuity(self):
+        self.log("%i" % len(self.buffer))
+        buffer_copy = copy.deepcopy(self.buffer)
+        for msg in buffer_copy:
+            count = self.ack_num
+            seq_num = int(msg["hdr"]["seq"])
+
+            self.log("Comparing sequence number: %i & %i" % (seq_num, count))
+
+            if seq_num != count:
+                self.log("Gap detected.")
+            else:
+                self.log("No gap detected. Printing!")
+                print(msg["msg"]["data"], end='', flush=True)
+                self.increment(msg)
+                self.buffer.remove(msg)
+
+            ack = self.ack(seq_num + sys.getsizeof(msg))
+            self.log("Sending acknowlegdment '%s'" % ack)
+            self.send(ack)
+
+
+    def ack(self, ack_num) -> dict:
         datagram = {
             "hdr": {
-                "ack": self.ack_num + msg_size,
+                "ack": ack_num,
             },
             "msg": {
                 "type": "ack",
             }
         }
-        self.ack_num += msg_size
         return datagram
+
+    def increment(self, msg):
+        self.ack_num += sys.getsizeof(msg)
+        if self.ack_num > 65535:
+            self.ack_num -= 65535
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='receive data')
