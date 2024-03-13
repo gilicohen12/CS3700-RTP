@@ -6,6 +6,34 @@ import select
 DATA_SIZE = 1024
 
 class Sender:
+    """
+    Sender class responsible for sending data using a reliable UDP protocol with selective repeat.
+
+    Attributes:
+    - CHECKSUM_SIZE (int): Size of the checksum in bytes.
+    - WINDOW (int): Maximum size of the sender's window.
+    - RTT (int): Round-trip time in seconds.
+    - time_sent (dict): Dictionary to store the time a message was sent.
+    - history (list): List to keep track of sent messages.
+    - adjust_RTT (int): Factor to adjust the RTT for timeout calculations.
+    - RTT_ratio (float): Ratio to update RTT for acknowledgment processing.
+    - MIN_WINDOW_SIZE (int): Minimum window size to prevent it from shrinking too much.
+
+    Methods:
+    - __init__(self, host, port): Constructor method to initialize the Sender object.
+    - log(self, message): Log a message to stderr.
+    - send(self, message): Send a message to the specified host and port.
+    - prepare_packets(self): Prepare the packets to be sent, including headers and checksums.
+    - run(self): Main execution loop of the sender.
+    - handle_timeouts(self): Check for timeout events and adjust the sender's state accordingly.
+    - process_acknowledgments(self): Process acknowledgment messages received from the receiver.
+    - get_hdr(self, msg): Extract the header from a received message.
+    - send_messages(self): Send messages from the prepared packets based on the current state.
+    - adjust_window(self): Adjust the sender's window size based on the current conditions.
+    - is_msg_not_corrupted(self, b: bytes) -> bool: Check if a received message is corrupted.
+
+    """
+
     CHECKSUM_SIZE = 20
     WINDOW = 14
     RTT = 1
@@ -16,6 +44,13 @@ class Sender:
     MIN_WINDOW_SIZE = 2
 
     def __init__(self, host, port):
+        """
+        Initialize the Sender object.
+
+        Parameters:
+        - host (str): Remote host to connect to.
+        - port (int): UDP port number to connect to.
+        """
         self.host = host
         self.remote_port = int(port)
         self.log(f"Sender starting up using port {self.remote_port}")
@@ -26,13 +61,28 @@ class Sender:
         self.prepare_packets()
 
     def log(self, message):
+        """
+        Log a message to stderr.
+
+        Parameters:
+        - message (str): Message to be logged.
+        """
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
 
     def send(self, message):
+        """
+        Send a message to the specified host and port.
+
+        Parameters:
+        - message (bytes): Message to be sent.
+        """
         self.socket.sendto(message, (self.host, self.remote_port))
 
     def prepare_packets(self):
+        """
+        Prepare the packets to be sent, including headers and checksums.
+        """
         data = sys.stdin.buffer.read(DATA_SIZE)
         self.loaded_msg_count = 0
         while data:
@@ -47,18 +97,27 @@ class Sender:
         self.received_acks = []
 
     def run(self):
+        """
+        Main execution loop of the sender.
+        """
         while True:
             self.handle_timeouts()
             self.process_acknowledgments()
             self.send_messages()
 
     def handle_timeouts(self):
-        for p in self.history[:]: # Iterate over a copy of history to avoid index issues
+        """
+        Check for timeout events and adjust the sender's state accordingly.
+        """
+        for p in self.history[:]:  # Iterate over a copy of history to avoid index issues
             if time.time() - self.time_sent[p] > self.RTT * self.adjust_RTT:
                 self.history.remove(p)
                 self.adjust_window()
 
     def process_acknowledgments(self):
+        """
+        Process acknowledgment messages received from the receiver.
+        """
         sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
         socks = select.select(sockets, [], [], 0.1)[0]
         for conn in socks:
@@ -70,16 +129,29 @@ class Sender:
                     if ack_msg in self.history:
                         self.history.remove(ack_msg)
                         self.received_acks.append(ack_msg)
-                        self.RTT = (self.RTT_ratio * self.RTT) + ((1 - self.RTT_ratio) * (time.time() - self.time_sent[ack_msg]))
+                        self.RTT = (self.RTT_ratio * self.RTT) + (
+                                (1 - self.RTT_ratio) * (time.time() - self.time_sent[ack_msg]))
                         print(self.RTT)
                         self.adjust_window()
                 else:
                     self.log("Message sent incorrectly: %s" % k)
 
     def get_hdr(self, msg):
+        """
+        Extract the header from a received message.
+
+        Parameters:
+        - msg (bytes): Received message.
+
+        Returns:
+        - int: Extracted header.
+        """
         return int.from_bytes(msg[1:3], byteorder='big')
 
     def send_messages(self):
+        """
+        Send messages from the prepared packets based on the current state.
+        """
         if len(self.received_acks) == self.loaded_msg_count:
             self.log("All done!")
             sys.exit(0)
@@ -95,6 +167,9 @@ class Sender:
             self.waiting = len(self.history) >= self.WINDOW
 
     def adjust_window(self):
+        """
+        Adjust the sender's window size based on the current conditions.
+        """
         unacked_packets = len(self.history)
         if unacked_packets >= self.WINDOW:
             self.WINDOW += 1
@@ -102,7 +177,16 @@ class Sender:
             # Reduce window ratio and adjust window size
             self.WINDOW = max(self.WINDOW * 0.55, self.MIN_WINDOW_SIZE)
 
-    def is_msg_not_corrupted(self, b: bytes) -> bool:
+    def is_msg_not_corrupted(self, b):
+        """
+        Check if a received message is corrupted.
+
+        Parameters:
+        - b (bytes): Received message.
+
+        Returns:
+        - bool: True if the message is not corrupted, False otherwise.
+        """
         received_digest = b[-self.CHECKSUM_SIZE:]
         calculated_digest = hashlib.sha1(b[:-self.CHECKSUM_SIZE]).digest()
         return received_digest == calculated_digest

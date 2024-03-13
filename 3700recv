@@ -8,10 +8,24 @@ LOGGING = True
 class Receiver:
     """
     UDP receiver class for receiving and processing data messages.
+
+    Attributes:
+    - ACK (bytes): ACK message identifier.
+
+    Methods:
+    - __init__(self): Constructor method to initialize the Receiver object.
+    - send(self, message_type, sequence, message): Send a message, including ACKs.
+    - log(self, msg): Log a message to stderr if logging is enabled.
+    - extract_sequence(self, message_bytes): Extract a sequence number from a message.
+    - append_checksum(self, message_bytes): Append a SHA-1 checksum to the given bytes.
+    - validate_checksum(self, message_bytes): Validate the SHA-1 checksum of the given bytes.
+    - investigate(self, message_bytes): Check if the received message is corrupted.
+    - identify(self, sequence, message_bytes): Check if the message is unique and store it.
+    - run(self): Main loop for receiving and processing messages.
+
     """
 
     ACK = bytes(b'\x01')
-
 
     def __init__(self):
         """
@@ -34,10 +48,10 @@ class Receiver:
         """
         Send a message.
 
-        Args:
-            msg_type (bytes): Type of message (MESSAGE or ACK).
-            seq_num (bytes): Sequence number of the message.
-            msg (str): The message content.
+        Parameters:
+        - message_type (bytes): Type of message (MESSAGE or ACK).
+        - sequence (bytes): Sequence number of the message.
+        - message (str): The message content.
         """
         ack = self.append_checksum(message_type + sequence + message.encode('utf-8'))
         self.socket.sendto(ack, (self.remote_host, self.remote_port))
@@ -45,10 +59,10 @@ class Receiver:
 
     def log(self, msg):
         """
-        Log a message to stderr.
+        Log a message to stderr if logging is enabled.
 
-        Args:
-            message (str): The message to log.
+        Parameters:
+        - msg (str): The message to log.
         """
         if LOGGING:
             sys.stderr.write(msg + "\n")
@@ -58,11 +72,11 @@ class Receiver:
         """
         Extracts a sequence number from a message.
 
-        Args:
-            msg (bytes): The message containing the sequence number.
+        Parameters:
+        - message_bytes (bytes): The message containing the sequence number.
 
         Returns:
-            int: The extracted sequence number.
+        - int: The extracted sequence number.
         """
         self.log("Extracting the sequence...")
         return int.from_bytes(message_bytes[1:3], byteorder='big')
@@ -71,11 +85,11 @@ class Receiver:
         """
         Appends a SHA-1 checksum to the given bytes.
 
-        Args:
-            msg_bytes (bytes): The bytes to append the checksum to.
+        Parameters:
+        - message_bytes (bytes): The bytes to append the checksum to.
 
         Returns:
-            bytes: The input bytes with the SHA-1 checksum appended.
+        - bytes: The input bytes with the SHA-1 checksum appended.
         """
         return message_bytes + hashlib.sha1(message_bytes).digest()
 
@@ -83,23 +97,38 @@ class Receiver:
         """
         Validates the SHA-1 checksum of the given bytes.
 
-        Args:
-            data_bytes (bytes): The bytes to validate.
+        Parameters:
+        - message_bytes (bytes): The bytes to validate.
 
         Returns:
-            bool: True if the checksum is valid, False otherwise.
+        - bool: True if the checksum is valid, False otherwise.
         """
         return message_bytes[-CHECKSUM_SIZE:] == hashlib.sha1(message_bytes[:-CHECKSUM_SIZE]).digest()
-    
+
     def investigate(self, message_bytes):
+        """
+        Check if the received message is corrupted.
+
+        Parameters:
+        - message_bytes (bytes): The received message.
+
+        Returns:
+        - bool: True if the message is not corrupted, False otherwise.
+        """
         return self.validate_checksum(message_bytes)
-    
+
     def identify(self, sequence, message_bytes):
+        """
+        Check if the message is unique and store it.
+
+        Parameters:
+        - sequence (int): The sequence number of the message.
+        - message_bytes (bytes): The received message.
+        """
         self.log("Checking if message is unique...")
         if sequence not in self.received_messages.keys():
             self.log("Unique message detected %s at %i..." % (message_bytes, sequence))
             self.received_messages[sequence] = message_bytes[3:-CHECKSUM_SIZE].decode('utf-8')
-        
 
     def run(self):
         """
@@ -131,8 +160,7 @@ class Receiver:
                 else:
                     self.log("Corrupted message: %s" % data)
         return
-    
-    
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='receive data')
