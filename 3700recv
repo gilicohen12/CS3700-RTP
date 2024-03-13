@@ -11,7 +11,7 @@ class Receiver:
     MESSAGE = bytes(b'\x00')
     ACK = bytes(b'\x01')
 
-    CHECKSUM_SIZE = 20  # SHA-1 digest size
+    CHECKSUM_SIZE = 20
 
     def __init__(self):
         """
