@@ -12,7 +12,7 @@ class Sender:
     time_sent = {}
     history = []
     adjust_RTT = 2
-    ORIG_RTT_RATIO = 0.7
+    RTT_ratio = 0.7
     MIN_WINDOW_SIZE = 2
 
     def __init__(self, host, port):
@@ -70,7 +70,7 @@ class Sender:
                     if ack_msg in self.history:
                         self.history.remove(ack_msg)
                         self.received_acks.append(ack_msg)
-                        self.RTT = (self.ORIG_RTT_RATIO * self.RTT) + ((1 - self.ORIG_RTT_RATIO) * (time.time() - self.time_sent[ack_msg]))
+                        self.RTT = (self.RTT_ratio * self.RTT) + ((1 - self.RTT_ratio) * (time.time() - self.time_sent[ack_msg]))
                         print(self.RTT)
                         self.adjust_window()
                 else:
