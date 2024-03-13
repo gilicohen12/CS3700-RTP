@@ -4,24 +4,16 @@ import argparse, socket, time, sys, hashlib
 import select
 
 DATA_SIZE = 1024
-RTT = 1
-WINDOW_SIZE = 4
 
 class Sender:
-    MESSAGE = bytes([0])
-    ACK = bytes([1])
-    RTT = 1.0
+    CHECKSUM_SIZE = 20
+    WINDOW = 14
+    RTT = 1
+    time_sent = {}
+    history = []
     adjust_RTT = 2
     ORIG_RTT_RATIO = 0.7
-
-    CHECKSUM_SIZE = 20
-
-    packets_out = []
-    window = 14
-    WINDOW_INCREASE = 1
-    WINDOW_REDUCE_RATIO = 0.55
-    WINDOW_MIN = 2
-    time_last_sent = {}
+    MIN_WINDOW_SIZE = 2
 
     def __init__(self, host, port):
         self.host = host
@@ -31,89 +23,90 @@ class Sender:
         self.socket.bind(('0.0.0.0', 0))
         self.waiting = False
         self.packets = []
-        data = sys.stdin.buffer.read(DATA_SIZE)
-        self.sequence_number = 0
-        while data:
-            self.packets.append(self.prepare_packet(self.MESSAGE, self.seq_num(self.sequence_number), data))
-            data = sys.stdin.buffer.read(DATA_SIZE)
-            self.sequence_number += 1
-        self.log(f"Fully chunked {self.sequence_number} packets!")
-        self.acked_packets = []
+        self.prepare_packets()
 
     def log(self, message):
         sys.stderr.write(message + "\n")
         sys.stderr.flush()
 
-    def send(self, message: bytes):
+    def send(self, message):
         self.socket.sendto(message, (self.host, self.remote_port))
 
-    def prepare_packet(self, type: bytes, seq_num: bytes, message: bytes) -> bytes:
-        header = type + seq_num
-        checksum = hashlib.sha1(header + message).digest()
-        return header + message + checksum
+    def prepare_packets(self):
+        data = sys.stdin.buffer.read(DATA_SIZE)
+        self.loaded_msg_count = 0
+        while data:
+            header = bytes([0]) + self.loaded_msg_count.to_bytes(2, byteorder='big')
+            checksum = hashlib.sha1(header + data).digest()
+            packet = header + data + checksum
+            self.packets.append(packet)
+            data = sys.stdin.buffer.read(DATA_SIZE)
+            self.loaded_msg_count += 1
+            self.log("sequence: %s" % self.loaded_msg_count)
+        self.log("Count of loaded messages: %s" % self.loaded_msg_count)
+        self.received_acks = []
 
-    def seq_num(self, num: int) -> bytes:
-        return bytes([(num // 256) % 256, num % 256])
+    def run(self):
+        while True:
+            self.handle_timeouts()
+            self.process_acknowledgments()
+            self.send_messages()
 
-    def seq_from(self, msg: bytes) -> int:
+    def handle_timeouts(self):
+        for p in self.history[:]: # Iterate over a copy of history to avoid index issues
+            if time.time() - self.time_sent[p] > self.RTT * self.adjust_RTT:
+                self.history.remove(p)
+                self.adjust_window()
+
+    def process_acknowledgments(self):
+        sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
+        socks = select.select(sockets, [], [], 0.1)[0]
+        for conn in socks:
+            if conn == self.socket:
+                k, addr = conn.recvfrom(65535)
+                if self.is_msg_not_corrupted(k) and k[0:1] == bytes([1]):
+                    ack_msg = self.get_hdr(k)
+                    self.log(f"Received message: '{ack_msg}'")
+                    if ack_msg in self.history:
+                        self.history.remove(ack_msg)
+                        self.received_acks.append(ack_msg)
+                        self.RTT = (self.ORIG_RTT_RATIO * self.RTT) + ((1 - self.ORIG_RTT_RATIO) * (time.time() - self.time_sent[ack_msg]))
+                        print(self.RTT)
+                        self.adjust_window()
+                else:
+                    self.log("Message sent incorrectly: %s" % k)
+
+    def get_hdr(self, msg):
         return int.from_bytes(msg[1:3], byteorder='big')
 
-    def min_not_sent(self):
-        m = 0
-        while m in self.acked_packets or m in self.packets_out:
-            m += 1
-        return m
+    def send_messages(self):
+        if len(self.received_acks) == self.loaded_msg_count:
+            self.log("All done!")
+            sys.exit(0)
+        block_num = 0
+        while block_num in self.received_acks or block_num in self.history:
+            block_num += 1
+        if block_num < len(self.packets):
+            msg = self.packets[block_num]
+            self.history.append(block_num)
+            self.send(msg)
+            self.log(f"Sending message '{block_num}', current_history: {self.history}")
+            self.time_sent[block_num] = time.time()
+            self.waiting = len(self.history) >= self.WINDOW
+
+    def adjust_window(self):
+        unacked_packets = len(self.history)
+        if unacked_packets >= self.WINDOW:
+            self.WINDOW += 1
+        elif unacked_packets < self.WINDOW and self.WINDOW > self.MIN_WINDOW_SIZE:
+            # Reduce window ratio and adjust window size
+            self.WINDOW = max(self.WINDOW * 0.55, self.MIN_WINDOW_SIZE)
 
     def is_msg_not_corrupted(self, b: bytes) -> bool:
         received_digest = b[-self.CHECKSUM_SIZE:]
         calculated_digest = hashlib.sha1(b[:-self.CHECKSUM_SIZE]).digest()
         return received_digest == calculated_digest
 
-    def run(self):
-        while True:
-            sockets = [self.socket, sys.stdin] if not self.waiting else [self.socket]
-
-            # Retransmission Timeout Handling
-            for i in range(len(self.packets_out) - 1, -1, -1): # Iterate in reverse
-                p = self.packets_out[i]
-                if time.time() - self.time_last_sent[p] > self.RTT * self.adjust_RTT:
-                    self.packets_out.remove(p)
-                    self.window = max(self.window * self.WINDOW_REDUCE_RATIO, self.WINDOW_MIN) # Window Size Adjustment
-
-            self.waiting = len(self.packets_out) >= self.window
-
-            socks = select.select(sockets, [], [], 0.1)[0]
-            for conn in socks:
-                if conn == self.socket:
-                    k, _ = conn.recvfrom(65535)
-
-                    if self.is_msg_not_corrupted(k) and k[0:1] == self.ACK:
-                        self.log(f"Received message '{k}'")
-                        acked = self.seq_from(k)
-                        if acked in self.packets_out:
-                            self.packets_out.remove(acked)
-                            self.acked_packets.append(acked)
-                            self.RTT = (self.ORIG_RTT_RATIO * self.RTT) + ((1 - self.ORIG_RTT_RATIO) * (time.time() - self.time_last_sent[acked]))
-                            print(self.RTT)
-                            self.window += self.WINDOW_INCREASE
-
-                        self.waiting = len(self.packets_out) >= self.window
-                    else:
-                        self.log(f"Received bad message '{k}'")
-                elif conn == sys.stdin:
-                    if len(self.acked_packets) == self.sequence_number:
-                        self.log("All done!")
-                        sys.exit(0)
-
-                    sending = self.min_not_sent()
-                    if sending < len(self.packets):
-                        msg = self.packets[sending]
-                        self.packets_out.append(sending)
-                        self.log(f"Sending message '{sending}', packets_out: {self.packets_out}")
-                        self.send(msg)
-                        self.time_last_sent[sending] = time.time()
-                        self.waiting = len(self.packets_out) >= self.window
-        return
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description='send data')
